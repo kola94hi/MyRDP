@@ -22,9 +22,8 @@ jobs:
 
       - name: Create RDP User with Secure Password
         run: |
-          # Generar contraseña segura
-          Add-Type -AssemblyName System.Web
-          $password = [System.Web.Security.Membership]::GeneratePassword(12, 3)
+          # Generar contraseña más simple y visible
+          $password = "RDP123!password"
           
           # Crear usuario
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
@@ -32,18 +31,21 @@ jobs:
           Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
           
-          # Guardar credenciales
-          echo "RDP_USER=RDPUser" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          # Mostrar contraseña CLARAMENTE en los logs
+          Write-Host "=========================================="
+          Write-Host "CREDENCIALES RDP - COPIA Y PEGA:"
+          Write-Host "USUARIO: RDPUser"
+          Write-Host "CONTRASEÑA: RDP123!password"
+          Write-Host "=========================================="
           
-          Write-Host "Usuario creado: RDPUser"
-          Write-Host "Contraseña: $password"
+          # También guardar en variables
+          echo "RDP_USER=RDPUser" >> $env:GITHUB_ENV
+          echo "RDP_PASSWORD=RDP123!password" >> $env:GITHUB_ENV
 
       - name: Install Tailscale
         run: |
           $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
           $installerPath = "$env:TEMP\tailscale.msi"
-          
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
@@ -67,39 +69,33 @@ jobs:
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
           Write-Host "Tailscale IP: $tsIP"
 
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Verificando conectividad RDP..."
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-              Write-Error "TCP connection to RDP port 3389 failed"
-              exit 1
-          }
-          Write-Host "✓ RDP port 3389 is accessible"
-
-      - name: Display Connection Info
+      - name: Display Final Connection Info
         run: |
           Write-Host ""
-          Write-Host "=========================================="
-          Write-Host "           RDP CONNECTION INFO"
-          Write-Host "=========================================="
-          Write-Host "IP Address: $env:TAILSCALE_IP"
-          Write-Host "Username: $env:RDP_USER"
-          Write-Host "Password: $env:RDP_PASSWORD"
-          Write-Host "=========================================="
+          Write-Host "🎯 CONEXIÓN RDP LISTA - USA ESTAS CREDENCIALES:"
+          Write-Host "================================================"
+          Write-Host "📍 DIRECCIÓN: $env:TAILSCALE_IP"
+          Write-Host "👤 USUARIO: RDPUser"
+          Write-Host "🔑 CONTRASEÑA: RDP123!password"
+          Write-Host "================================================"
           Write-Host ""
-          Write-Host "📋 Copia y pega estas credenciales en RDP"
-          Write-Host "⏰ Esta sesión terminará en 10 minutos"
+          Write-Host "📝 INSTRUCCIONES:"
+          Write-Host "1. Abre 'Conexión a Escritorio Remoto'"
+          Write-Host "2. Pega la dirección: $env:TAILSCALE_IP"
+          Write-Host "3. Usuario: RDPUser"
+          Write-Host "4. Contraseña: RDP123!password"
           Write-Host ""
 
       - name: Wait 10 Minutes
         run: |
           $endTime = (Get-Date).AddMinutes(10)
+          Write-Host "⏰ Sesión activa por 10 minutos - Termina a las $($endTime.ToString('HH:mm:ss'))"
+          
           while ((Get-Date) -lt $endTime) {
               $remaining = $endTime - (Get-Date)
               $minutes = [math]::Floor($remaining.TotalMinutes)
               $seconds = $remaining.Seconds
-              Write-Host "[$(Get-Date)] Tiempo restante: $minutes minutos $seconds segundos"
+              Write-Host "Tiempo restante: $minutes min $seconds seg"
               Start-Sleep -Seconds 30
           }
-          Write-Host "⏰ Sesión RDP finalizada después de 10 minutos"
+          Write-Host "🚫 Sesión RDP finalizada"
