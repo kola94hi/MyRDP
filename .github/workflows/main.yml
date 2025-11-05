@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15  # Un poco más que 10 para dar margen
 
     steps:
       - name: Configure Core RDP Settings
@@ -98,43 +98,24 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Auto-restart Script
+      - name: Display Connection Info and Wait 10 Minutes
         run: |
-          # Script que se reinicia automáticamente después de 5 minutos
-          $scriptBlock = {
-              param($tailscaleIP, $creds)
-              
-              Write-Host "`n=== RDP ACCESS ==="
-              Write-Host "Address: $tailscaleIP"
-              Write-Host "Credentials: $creds"
-              Write-Host "==================`n"
-              Write-Host "This session will automatically restart in 5 minutes to prevent GitHub account suspension"
-              
-              $startTime = Get-Date
-              $restartTime = $startTime.AddMinutes(5)
-              
-              while ((Get-Date) -lt $restartTime) {
-                  $remaining = $restartTime - (Get-Date)
-                  Write-Host "[$(Get-Date)] RDP Active - Time remaining: $([math]::Round($remaining.TotalMinutes, 1)) minutes"
-                  Start-Sleep -Seconds 30
-              }
-              
-              Write-Host "Restarting workflow to avoid GitHub limits..."
-              exit 0
+          Write-Host "`n=== RDP ACCESS ==="
+          Write-Host "Address: $env:TAILSCALE_IP"
+          Write-Host "Username: RDP"
+          Write-Host "Password: $(echo $env:RDP_CREDS)"
+          Write-Host "==================`n"
+          Write-Host "This RDP session will automatically terminate in 10 minutes"
+          Write-Host "Started at: $(Get-Date)"
+          
+          # Countdown timer for 10 minutes (600 seconds)
+          $endTime = (Get-Date).AddMinutes(10)
+          while ((Get-Date) -lt $endTime) {
+              $remaining = $endTime - (Get-Date)
+              $minutes = [math]::Floor($remaining.TotalMinutes)
+              $seconds = $remaining.Seconds
+              Write-Host "[$(Get-Date)] Time remaining: $minutes minutes $seconds seconds - Session will auto-terminate soon"
+              Start-Sleep -Seconds 30
           }
           
-          # Ejecutar el script en un job separado
-          Start-Job -ScriptBlock $scriptBlock -ArgumentList $env:TAILSCALE_IP, $env:RDP_CREDS
-          
-          # Esperar a que el job termine (después de 5 minutos)
-          Get-Job | Wait-Job | Out-Null
-          
-          # Forzar la finalización después del tiempo límite
-          Write-Host "Workflow completed - Ready for restart"
-
-      - name: Force Cleanup
-        run: |
-          Write-Host "Cleaning up before exit..."
-          # Limpiar procesos y conexiones
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" down
-          Stop-Process -Name "tailscale*" -Force -ErrorAction SilentlyContinue
+          Write-Host "10-minute session completed. Terminating RDP access."
