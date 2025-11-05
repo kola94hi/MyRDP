@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
 
     steps:
       - name: Configure Core RDP Settings
@@ -86,10 +86,10 @@ jobs:
           Write-Host "4. Contraseña: RDP123!password"
           Write-Host ""
 
-      - name: Wait 30 Minutes
+      - name: Wait 25 Minutes
         run: |
-          $endTime = (Get-Date).AddMinutes(30)
-          Write-Host "⏰ Sesión activa por 30 minutos - Termina a las $($endTime.ToString('HH:mm:ss'))"
+          $endTime = (Get-Date).AddMinutes(25)
+          Write-Host "⏰ Sesión activa por 25 minutos - Termina a las $($endTime.ToString('HH:mm:ss'))"
           
           while ((Get-Date) -lt $endTime) {
               $remaining = $endTime - (Get-Date)
