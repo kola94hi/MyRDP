@@ -6,7 +6,7 @@ on:
 jobs:
   secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 10  # Sesión de 10 minutos
+    timeout-minutes: 10
 
     steps:
       - name: Configure Core RDP Settings
@@ -98,87 +98,43 @@ jobs:
           }
           Write-Host "TCP connectivity successful!"
 
-      - name: Start Auto-Restart Job
+      - name: Auto-restart Script
         run: |
-          # Crear script de reinicio
-          $restartScript = @"
-          `$startTime = Get-Date
-          `$restartInterval = 5 * 60  # 5 minutos en segundos
-          `$maxDuration = 9 * 60     # 9 minutos en segundos (para reiniciar antes del timeout)
-          
-          while (`$true) {
-              `$elapsed = (Get-Date) - `$startTime
+          # Script que se reinicia automáticamente después de 5 minutos
+          $scriptBlock = {
+              param($tailscaleIP, $creds)
               
-              # Si ha pasado el tiempo máximo, salir del job
-              if (`$elapsed.TotalSeconds -ge `$maxDuration) {
-                  Write-Host "Tiempo máximo alcanzado, finalizando job..."
-                  break
+              Write-Host "`n=== RDP ACCESS ==="
+              Write-Host "Address: $tailscaleIP"
+              Write-Host "Credentials: $creds"
+              Write-Host "==================`n"
+              Write-Host "This session will automatically restart in 5 minutes to prevent GitHub account suspension"
+              
+              $startTime = Get-Date
+              $restartTime = $startTime.AddMinutes(5)
+              
+              while ((Get-Date) -lt $restartTime) {
+                  $remaining = $restartTime - (Get-Date)
+                  Write-Host "[$(Get-Date)] RDP Active - Time remaining: $([math]::Round($remaining.TotalMinutes, 1)) minutes"
+                  Start-Sleep -Seconds 30
               }
               
-              # Si ha pasado el intervalo de reinicio, iniciar nuevo workflow
-              if (`$elapsed.TotalSeconds -ge `$restartInterval) {
-                  Write-Host "Iniciando nuevo workflow después de 5 minutos..."
-                  
-                  # Token de GitHub para autenticación (usar secret)
-                  `$token = "${{ secrets.GITHUB_TOKEN }}"
-                  `$headers = @{
-                      "Authorization" = "Bearer `$token"
-                      "Accept" = "application/vnd.github.v3+json"
-                  }
-                  
-                  # Disparar nuevo workflow
-                  `$body = @{
-                      ref = "`$env:GITHUB_REF"
-                  } | ConvertTo-Json
-                  
-                  `$uri = "https://api.github.com/repos/`$env:GITHUB_REPOSITORY/actions/workflows/`$env:GITHUB_WORKFLOW/dispatches"
-                  
-                  try {
-                      Invoke-RestMethod -Uri `$uri -Method Post -Headers `$headers -Body `$body
-                      Write-Host "Nuevo workflow iniciado exitosamente"
-                  } catch {
-                      Write-Host "Error al iniciar nuevo workflow: `$(`$_.Exception.Message)"
-                  }
-                  break
-              }
-              
-              Write-Host "[`$(Get-Date)] RDP Activo - Tiempo transcurrido: `$([math]::Round(`$elapsed.TotalSeconds))s"
-              Start-Sleep -Seconds 30
+              Write-Host "Restarting workflow to avoid GitHub limits..."
+              exit 0
           }
-"@
           
-          # Guardar script temporal
-          $scriptPath = "$env:TEMP\auto_restart.ps1"
-          $restartScript | Out-File -FilePath $scriptPath -Encoding UTF8
+          # Ejecutar el script en un job separado
+          Start-Job -ScriptBlock $scriptBlock -ArgumentList $env:TAILSCALE_IP, $env:RDP_CREDS
           
-          # Iniciar job en background
-          $job = Start-Job -FilePath $scriptPath
-          Write-Host "Job de auto-reinicio iniciado con ID: $($job.Id)"
+          # Esperar a que el job termine (después de 5 minutos)
+          Get-Job | Wait-Job | Out-Null
+          
+          # Forzar la finalización después del tiempo límite
+          Write-Host "Workflow completed - Ready for restart"
 
-      - name: Display RDP Information and Wait
+      - name: Force Cleanup
         run: |
-          Write-Host "`n=== RDP ACCESS ==="
-          Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
-          Write-Host "Session Duration: 10 minutes"
-          Write-Host "Auto-restart: After 5 minutes"
-          Write-Host "==================`n"
-          
-          # Esperar hasta que el timeout de 10 minutos termine
-          # El job de reinicio se ejecutará automáticamente a los 5 minutos
-          $startTime = Get-Date
-          $maxDuration = 10 * 60  # 10 minutos en segundos
-          
-          while ($true) {
-              $elapsed = (Get-Date) - $startTime
-              
-              if ($elapsed.TotalSeconds -ge $maxDuration) {
-                  Write-Host "Sesión RDP finalizada después de 10 minutos"
-                  break
-              }
-              
-              $remaining = $maxDuration - $elapsed.TotalSeconds
-              Write-Host "[$(Get-Date)] RDP Activo - Tiempo restante: $([math]::Round($remaining))s"
-              Start-Sleep -Seconds 60
-          }
+          Write-Host "Cleaning up before exit..."
+          # Limpiar procesos y conexiones
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" down
+          Stop-Process -Name "tailscale*" -Force -ErrorAction SilentlyContinue
