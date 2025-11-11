@@ -1,309 +1,129 @@
-name: RDP with Internet Sharing
+name: Windows RDP via Tailscale
 
 on:
   workflow_dispatch:
 
 jobs:
-  secure-rdp:
+  windows-rdp:
     runs-on: windows-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
 
     steps:
-      - name: Configure Core RDP Settings
-        run: |
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+    - name: Configure Windows RDP
+      run: |
+        Write-Host "🔧 Configurando RDP..."
+        # Habilitar RDP
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0
+        # No requerir autenticación a nivel de red
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0
+        # Permitir conexiones sin NLA
+        Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0
+        
+        # Configurar firewall
+        netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+        netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+        
+        # Reiniciar servicio Terminal Services
+        Restart-Service TermService -Force
+        Start-Service SessionEnv
+        Write-Host "✅ RDP configurado"
 
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
+    - name: Create local user for RDP
+      run: |
+        Write-Host "👤 Creando usuario RDP..."
+        $Password = ConvertTo-SecureString "RDPpassword123!" -AsPlainText -Force
+        New-LocalUser -Name "rdpuser" -Password $Password -AccountNeverExpires
+        Add-LocalGroupMember -Group "Administrators" -Member "rdpuser"
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "rdpuser"
+        Write-Host "✅ Usuario creado: rdpuser / RDPpassword123!"
 
-          Restart-Service -Name TermService -Force
+    - name: Install Tailscale
+      run: |
+        Write-Host "📥 Instalando Tailscale..."
+        $TailscaleURL = "https://pkgs.tailscale.com/stable/tailscale-setup-amd64.msi"
+        $InstallerPath = "$env:TEMP\tailscale.msi"
+        
+        # Descargar Tailscale
+        Invoke-WebRequest -Uri $TailscaleURL -OutFile $InstallerPath
+        
+        # Instalar silenciosamente
+        Start-Process msiexec.exe -Wait -ArgumentList @(
+            "/i",
+            "`"$InstallerPath`"",
+            "/quiet",
+            "/norestart"
+        )
+        
+        # Esperar a que se instale
+        Start-Sleep -Seconds 10
+        Remove-Item $InstallerPath -Force
+        Write-Host "✅ Tailscale instalado"
 
-      - name: Create RDP User with Secure Password
-        run: |
-          # Generar contraseña más simple y visible
-          $password = "RDP123!password"
-          
-          # Crear usuario
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
-          
-          # Mostrar contraseña CLARAMENTE en los logs
-          Write-Host "=========================================="
-          Write-Host "CREDENCIALES RDP - COPIA Y PEGA:"
-          Write-Host "USUARIO: RDPUser"
-          Write-Host "CONTRASEÑA: RDP123!password"
-          Write-Host "=========================================="
-          
-          # También guardar en variables
-          echo "RDP_USER=RDPUser" >> $env:GITHUB_ENV
-          echo "RDP_PASSWORD=RDP123!password" >> $env:GITHUB_ENV
+    - name: Connect to Tailscale
+      run: |
+        Write-Host "🔗 Conectando a Tailscale..."
+        
+        # Conectar a Tailscale
+        & "C:\Program Files\Tailscale\tailscale.exe" up --auth-key=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=github-rdp-${{ github.run_id }}
+        
+        # Esperar conexión
+        Start-Sleep -Seconds 15
+        
+        # Obtener IP de Tailscale
+        $TailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        if (-not $TailscaleIP) {
+            Write-Host "⚠️ Obteniendo IP de Tailscale (reintentando)..."
+            Start-Sleep -Seconds 10
+            $TailscaleIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
+        }
+        
+        if ($TailscaleIP) {
+            Write-Host "✅ Tailscale IP: $TailscaleIP"
+            echo "TAILSCALE_IP=$TailscaleIP" >> $env:GITHUB_ENV
+        } else {
+            Write-Host "❌ No se pudo obtener IP de Tailscale"
+            echo "TAILSCALE_IP=ERROR" >> $env:GITHUB_ENV
+        }
 
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
+    - name: Display connection information
+      run: |
+        Write-Host ""
+        Write-Host "🎉 CONEXIÓN RDP LISTA 🎉"
+        Write-Host "=================================================="
+        Write-Host "📍 DIRECCIÓN: $env:TAILSCALE_IP"
+        Write-Host "👤 USUARIO: rdpuser"
+        Write-Host "🔑 CONTRASEÑA: RDPpassword123!"
+        Write-Host "=================================================="
+        Write-Host ""
+        Write-Host "📝 INSTRUCCIONES:"
+        Write-Host "1. Abre 'Conexión a Escritorio Remoto'"
+        Write-Host "2. Pega esta IP: $env:TAILSCALE_IP"
+        Write-Host "3. Usuario: rdpuser"
+        Write-Host "4. Contraseña: RDPpassword123!"
+        Write-Host ""
+        Write-Host "⏰ Esta sesión estará activa por 25 minutos"
+        Write-Host ""
 
-      - name: Configure Tailscale as Exit Node
-        run: |
-          Write-Host "🔧 Configurando Tailscale como nodo de salida..."
-          
-          # Configurar Tailscale como exit node
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --advertise-exit-node --accept-routes
-          
-          # Esperar a que Tailscale se conecte
-          Start-Sleep -Seconds 10
-          
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-              $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
-              Start-Sleep -Seconds 5
-              $retries++
-          }
-          
-          if (-not $tsIP) {
-              Write-Error "Tailscale IP not assigned. Exiting."
-              exit 1
-          }
-          echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
-          Write-Host "✅ Tailscale IP: $tsIP"
-
-      - name: Configure Internet Sharing via Hotspot
-        run: |
-          Write-Host "🌐 Configurando compartir internet a través de Hotspot..."
-          
-          # Verificar soporte de hotspot
-          $wlanDrivers = netsh wlan show drivers
-          $hostedNetworkSupported = $wlanDrivers | Select-String "Hosted network supported" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
-          
-          if ($hostedNetworkSupported -eq "Yes") {
-              Write-Host "✅ Hardware compatible con Hotspot"
-              
-              # Configurar hotspot
-              $hotspotName = "Tailscale-Internet"
-              $hotspotPassword = "Share123!"
-              
-              netsh wlan set hostednetwork mode=allow ssid=$hotspotName key=$hotspotPassword
-              netsh wlan start hostednetwork
-              
-              Write-Host "📶 Hotspot creado:"
-              Write-Host "   SSID: $hotspotName"
-              Write-Host "   Password: $hotspotPassword"
-              
-              echo "HOTSPOT_SSID=$hotspotName" >> $env:GITHUB_ENV
-              echo "HOTSPOT_PASSWORD=$hotspotPassword" >> $env:GITHUB_ENV
-              echo "HOTSPOT_ENABLED=true" >> $env:GITHUB_ENV
-              
-          } else {
-              Write-Host "⚠️  Hotspot no disponible, configurando solo Tailscale Exit Node"
-              echo "HOTSPOT_ENABLED=false" >> $env:GITHUB_ENV
-          }
-
-      - name: Configure Network Bridge for Internet Sharing
-        run: |
-          Write-Host "🔗 Configurando puente de red para compartir internet..."
-          
-          try {
-              # Obtener interfaces de red
-              $tsAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Tailscale*" }
-              $hotspotAdapter = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Hosted*" }
-              
-              Write-Host "Interfaces detectadas:"
-              Write-Host "  - Tailscale: $($tsAdapter.Name)"
-              if ($hotspotAdapter) {
-                  Write-Host "  - Hotspot: $($hotspotAdapter.Name)"
-              }
-              
-              # Configurar IP estática para el hotspot si existe
-              if ($hotspotAdapter -and $env:HOTSPOT_ENABLED -eq 'true') {
-                  Write-Host "📡 Configurando red hotspot..."
-                  netsh interface ip set address "Wi-Fi" static 192.168.137.1 255.255.255.0
-                  
-                  # Configurar DHCP simulado para dispositivos conectados
-                  Write-Host "🔄 Configurando servicio DHCP básico..."
-                  
-                  # Habilitar compartir conexión a nivel de firewall
-                  netsh advfirewall firewall add rule name="Hotspot Internet" dir=in action=allow protocol=ANY localport=ANY
-                  netsh advfirewall firewall add rule name="Hotspot Internet Out" dir=out action=allow protocol=ANY localport=ANY
-                  
-                  Write-Host "✅ Red hotspot configurada: 192.168.137.1/24"
-              }
-              
-              # Configurar políticas de enrutamiento
-              Write-Host "🛣️  Configurando enrutamiento..."
-              
-              # Habilitar IP forwarding
-              Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters" -Name "IpEnableRouter" -Value 1 -Type DWord
-              
-              # Configurar NAT básico para compartir internet
-              netsh interface portproxy reset
-              
-              Write-Host "✅ Enrutamiento configurado"
-              
-          } catch {
-              Write-Host "⚠️  Algunas configuraciones de red no pudieron aplicarse: $($_.Exception.Message)"
-              Write-Host "💡 El compartir internet puede requerir configuración manual via RDP"
-          }
-
-      - name: Enable Remote Desktop Internet Sharing Features
-        run: |
-          Write-Host "🖥️  Habilitando funciones de compartir internet en RDP..."
-          
-          # Configurar RDP para permitir redirección de recursos
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "fDisableCdm" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "fEnableCdm" -Value 1 -Force
-          
-          # Habilitar acceso a unidades locales via RDP
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' -Name "RedirectDrives" -Value 1 -Force
-          
-          # Configurar para mejor rendimiento de red
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxMonitors" -Value 4 -Force
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxXResolution" -Value 4096 -Force
-          Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "MaxYResolution" -Value 2160 -Force
-          
-          Write-Host "✅ Funciones RDP mejoradas para compartir internet"
-
-      - name: Create Internet Sharing Instructions Script
-        run: |
-          Write-Host "📝 Creando script de instrucciones para compartir internet..."
-          
-          $instructions = @"
-# 🚀 INSTRUCCIONES PARA COMPARTIR INTERNET
-
-## CONFIGURACIÓN ACTUAL:
-- ✅ Tailscale configurado como Exit Node
-- ✅ RDP activado con usuario: RDPUser
-- ✅ Hotspot: $env:HOTSPOT_SSID (si está disponible)
-
-## CÓMO COMPARTIR INTERNET:
-
-### OPCIÓN 1: Usar Tailscale como VPN para otros dispositivos
-1. Instala Tailscale en tus otros dispositivos
-2. Conéctate a tu red Tailscale
-3. Configura este runner como Exit Node:
-   - Ve a: https://login.tailscale.com/admin/machines
-   - Encuentra: gh-runner-$env:GITHUB_RUN_ID
-   - Haz clic en "..." → "Use as exit node"
-
-### OPCIÓN 2: Hotspot directo (si disponible)
-1. Conéctate al WiFi: $env:HOTSPOT_SSID
-2. Password: $env:HOTSPOT_PASSWORD
-3. Configura IP manual: 192.168.137.x
-4. Gateway: 192.168.137.1
-
-### OPCIÓN 3: Configuración manual via RDP
-1. Conéctate via RDP a: $env:TAILSCALE_IP
-2. Una vez conectado:
-   - Abre "Configuración de Red"
-   - Ve a "Estado" → "Centro de redes y recursos compartidos"
-   - Haz clic en "Conexión de Tailscale"
-   - Ve a "Propiedades" → "Compartir"
-   - Marca "Permitir a otros usuarios..."
-   - Selecciona la conexión hotspot o Ethernet
-
-## COMANDOS ÚTILES en RDP:
-- Ver estado Tailscale: 
-  tailscale status
-- Ver IPs asignadas: 
-  tailscale ip
-- Reiniciar hotspot: 
-  netsh wlan start hostednetwork
-
-## DISPOSITIVOS CONECTADOS:
-- Todos los dispositivos en tu red Tailscale pueden usar este internet
-- Ancho de banda: Alta velocidad de GitHub Actions
-- Seguridad: Todo encriptado via Tailscale
-"@
-          
-          # Guardar instrucciones en archivo
-          $instructions | Out-File -FilePath "$env:TEMP\internet_sharing_instructions.txt" -Encoding UTF8
-          Write-Host "✅ Script de instrucciones creado en RDP: C:\Temp\internet_sharing_instructions.txt"
-
-      - name: Display Final Connection Info with Internet Sharing
-        run: |
-          Write-Host ""
-          Write-Host "🎯 CONEXIÓN RDP + COMPARTIR INTERNET LISTA"
-          Write-Host "================================================"
-          Write-Host "📍 DIRECCIÓN RDP: $env:TAILSCALE_IP"
-          Write-Host "👤 USUARIO: RDPUser"
-          Write-Host "🔑 CONTRASEÑA: RDP123!password"
-          Write-Host ""
-          
-          if ($env:HOTSPOT_ENABLED -eq 'true') {
-              Write-Host "📶 HOTSPOT WIFI:"
-              Write-Host "   SSID: $env:HOTSPOT_SSID"
-              Write-Host "   PASSWORD: $env:HOTSPOT_PASSWORD"
-              Write-Host "   RED: 192.168.137.1/24"
-          }
-          
-          Write-Host "🌐 COMPARTIR INTERNET:"
-          Write-Host "   ✅ Tailscale configurado como Exit Node"
-          Write-Host "   🔄 Puedes compartir esta conexión a otros dispositivos"
-          Write-Host "   📡 Ancho de banda de GitHub Actions disponible"
-          Write-Host "================================================"
-          Write-Host ""
-          Write-Host "📝 INSTRUCCIONES RDP:"
-          Write-Host "1. Conéctate a: $env:TAILSCALE_IP"
-          Write-Host "2. Usuario: RDPUser"
-          Write-Host "3. Contraseña: RDP123!password"
-          Write-Host ""
-          Write-Host "🔄 PARA COMPARTIR INTERNET:"
-          Write-Host "1. En RDP: Abre Centro de redes"
-          Write-Host "2. Comparte conexión Tailscale con otras interfaces"
-          Write-Host "3. O usa Tailscale como Exit Node para otros dispositivos"
-          Write-Host ""
-          Write-Host "💡 Script de instrucciones en: C:\Temp\internet_sharing_instructions.txt"
-
-      - name: Wait 30 Minutes with Connection Monitoring
-        run: |
-          $endTime = (Get-Date).AddMinutes(30)
-          Write-Host "⏰ Sesión activa por 30 minutos - Termina a las $($endTime.ToString('HH:mm:ss'))"
-          Write-Host "🌐 Monitoreando conexiones y uso de internet..."
-          
-          while ((Get-Date) -lt $endTime) {
-              $remaining = $endTime - (Get-Date)
-              $minutes = [math]::Floor($remaining.TotalMinutes)
-              $seconds = $remaining.Seconds
-              
-              Write-Host "--- Estado de la sesión ---"
-              Write-Host "⏱️  Tiempo restante: $minutes min $seconds seg"
-              
-              # Verificar estado Tailscale
-              try {
-                  $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
-                  Write-Host "🔗 Tailscale: $($tsStatus.BackendState)"
-                  Write-Host "📍 IP: $env:TAILSCALE_IP"
-              } catch {
-                  Write-Host "🔗 Tailscale: Error verificando estado"
-              }
-              
-              # Verificar hotspot si está activo
-              if ($env:HOTSPOT_ENABLED -eq 'true') {
-                  try {
-                      $hotspotStatus = netsh wlan show hostednetwork | Select-String "Status" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
-                      $clients = netsh wlan show hostednetwork | Select-String "Number of clients" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
-                      Write-Host "📶 Hotspot: $hotspotStatus (Clientes: $clients)"
-                  } catch {
-                      Write-Host "📶 Hotspot: No disponible"
-                  }
-              }
-              
-              Write-Host "💻 Instrucción: Conecta dispositivos para compartir internet"
-              Write-Host "---------------------------"
-              Start-Sleep -Seconds 30
-          }
-          
-          Write-Host "🚫 Sesión RDP finalizada"
-          Write-Host "📴 Desconectando compartir internet..."
-          
-          # Limpiar configuración
-          if ($env:HOTSPOT_ENABLED -eq 'true') {
-              netsh wlan stop hostednetwork
-          }
+    - name: Keep RDP session alive
+      run: |
+        Write-Host "🔄 Manteniendo sesión RDP activa..."
+        $StartTime = Get-Date
+        $EndTime = $StartTime.AddMinutes(25)
+        
+        while ((Get-Date) -lt $EndTime) {
+            $TimeLeft = $EndTime - (Get-Date)
+            $MinutesLeft = [math]::Floor($TimeLeft.TotalMinutes)
+            $SecondsLeft = $TimeLeft.Seconds
+            
+            # Verificar estado de Tailscale
+            $CurrentIP = & "C:\Program Files\Tailscale\tailscale.exe" ip -4 2>$null
+            
+            Write-Host "⏱️ Tiempo restante: $MinutesLeft min $SecondsLeft seg | IP: $CurrentIP"
+            
+            # Mantener servicios activos
+            Get-Service TermService | Set-Service -Status Running -ErrorAction SilentlyContinue
+            
+            Start-Sleep -Seconds 30
+        }
+        
+        Write-Host "🛑 Sesión RDP finalizada"
