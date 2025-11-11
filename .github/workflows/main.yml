@@ -1,4 +1,4 @@
-name: RDP
+name: RDP with Hotspot
 
 on:
   workflow_dispatch:
@@ -50,9 +50,114 @@ jobs:
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
           Remove-Item $installerPath -Force
 
+      - name: Check Hotspot Hardware Support
+        id: check_hotspot
+        run: |
+          Write-Host "🔍 Verificando compatibilidad con Hotspot..."
+          
+          # Verificar drivers de WiFi
+          $wlanDrivers = netsh wlan show drivers
+          $hostedNetworkSupported = $wlanDrivers | Select-String "Hosted network supported" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
+          
+          # Verificar adaptadores WiFi disponibles
+          $wifiAdapters = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*wireless*" -or $_.InterfaceDescription -like "*wifi*" -or $_.Name -like "*Wi-Fi*" }
+          $hasWifiAdapter = ($wifiAdapters | Measure-Object).Count -gt 0
+          
+          # Verificar si hay interfaces virtuales existentes
+          $hostedInterfaces = Get-NetAdapter | Where-Object { $_.InterfaceDescription -like "*Hosted*" }
+          
+          Write-Host "📊 Resultados de compatibilidad:"
+          Write-Host "   - Soporte de red alojada: $hostedNetworkSupported"
+          Write-Host "   - Adaptadores WiFi encontrados: $($wifiAdapters.Count)"
+          Write-Host "   - Interfaces alojadas existentes: $($hostedInterfaces.Count)"
+          
+          $hotspotSupported = ($hostedNetworkSupported -eq "Yes") -and $hasWifiAdapter
+          
+          if ($hotspotSupported) {
+              Write-Host "✅ El hardware SOPORTA Hotspot WiFi"
+              echo "HOTSPOT_SUPPORTED=true" >> $env:GITHUB_ENV
+          } else {
+              Write-Host "❌ El hardware NO SOPORTA Hotspot WiFi"
+              Write-Host "💡 Se usará solo RDP a través de Tailscale"
+              echo "HOTSPOT_SUPPORTED=false" >> $env:GITHUB_ENV
+          }
+
+      - name: Configure Hotspot WiFi (si está soportado)
+        if: env.HOTSPOT_SUPPORTED == 'true'
+        run: |
+          # Configurar hotspot WiFi
+          $hotspotName = "GitHubRDP-Hotspot"
+          $hotspotPassword = "Hotspot123!"
+          
+          Write-Host "🔧 Configurando Hotspot WiFi..."
+          
+          try {
+              # Detener hotspot existente si hay
+              netsh wlan stop hostednetwork 2>$null
+              
+              # Configurar nuevo hotspot
+              $setResult = netsh wlan set hostednetwork mode=allow ssid=$hotspotName key=$hotspotPassword
+              Write-Host "Configuración hotspot: $setResult"
+              
+              # Iniciar hotspot
+              $startResult = netsh wlan start hostednetwork
+              Write-Host "Inicio hotspot: $startResult"
+              
+              # Esperar a que se active
+              Start-Sleep -Seconds 3
+              
+              # Verificar estado
+              $status = netsh wlan show hostednetwork | Select-String "Status" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
+              
+              if ($status -eq "Started") {
+                  Write-Host "✅ Hotspot WiFi activado correctamente"
+                  Write-Host "📶 SSID: $hotspotName"
+                  Write-Host "🔑 Password: $hotspotPassword"
+                  
+                  echo "HOTSPOT_SSID=$hotspotName" >> $env:GITHUB_ENV
+                  echo "HOTSPOT_PASSWORD=$hotspotPassword" >> $env:GITHUB_ENV
+                  echo "HOTSPOT_STATUS=active" >> $env:GITHUB_ENV
+              } else {
+                  Write-Host "❌ No se pudo iniciar el hotspot. Estado: $status"
+                  echo "HOTSPOT_STATUS=failed" >> $env:GITHUB_ENV
+              }
+              
+          } catch {
+              Write-Host "❌ Error configurando hotspot: $($_.Exception.Message)"
+              echo "HOTSPOT_STATUS=error" >> $env:GITHUB_ENV
+          }
+
+      - name: Configure Alternative Network Sharing
+        if: env.HOTSPOT_SUPPORTED == 'false'
+        run: |
+          Write-Host "🔄 Configurando alternativa de red..."
+          
+          # Crear información de red local simulada
+          $localNetworkInfo = @"
+📡 CONFIGURACIÓN DE RED ALTERNATIVA
+================================
+Como el hardware no soporta Hotspot WiFi, puedes:
+
+1. **CONEXIÓN DIRECTA RDP:**
+   - Usa la IP de Tailscale proporcionada abajo
+   - Todo el tráfico ya está protegido por VPN
+
+2. **COMPARTIR CONEXIÓN MANUALMENTE:**
+   - Conecta otro dispositivo a Tailscale
+   - Usa la misma red VPN segura
+   - Accede al RDP desde cualquier dispositivo en Tailscale
+
+3. **USO MÚLTIPLE DISPOSITIVOS:**
+   - Añade más dispositivos a tu red Tailscale
+   - Todos podrán acceder al RDP de forma segura
+"@
+          
+          Write-Host $localNetworkInfo
+          echo "NETWORK_ALTERNATIVE=true" >> $env:GITHUB_ENV
+
       - name: Establish Tailscale Connection
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --advertise-exit-node
           
           $tsIP = $null
           $retries = 0
@@ -72,21 +177,45 @@ jobs:
       - name: Display Final Connection Info
         run: |
           Write-Host ""
-          Write-Host "🎯 CONEXIÓN RDP LISTA - USA ESTAS CREDENCIALES:"
+          Write-Host "🎯 CONEXIÓN RDP LISTA"
           Write-Host "================================================"
-          Write-Host "📍 DIRECCIÓN: $env:TAILSCALE_IP"
+          Write-Host "📍 DIRECCIÓN RDP: $env:TAILSCALE_IP"
           Write-Host "👤 USUARIO: RDPUser"
           Write-Host "🔑 CONTRASEÑA: RDP123!password"
+          Write-Host ""
+          
+          if ($env:HOTSPOT_STATUS -eq 'active') {
+              Write-Host "📶 HOTSPOT WIFI ACTIVO:"
+              Write-Host "   SSID: $env:HOTSPOT_SSID"
+              Write-Host "   PASSWORD: $env:HOTSPOT_PASSWORD"
+              Write-Host "   📡 Conéctate a este WiFi para acceso local"
+          } elseif ($env:HOTSPOT_SUPPORTED -eq 'false') {
+              Write-Host "💡 MODO SIN HOTSPOT:"
+              Write-Host "   Este runner no tiene hardware WiFi compatible"
+              Write-Host "   ✅ Usa RDP directamente con la IP de Tailscale"
+              Write-Host "   🔗 Puedes conectar múltiples dispositivos a Tailscale"
+          } else {
+              Write-Host "⚠️  Hotspot no disponible"
+              Write-Host "   ✅ RDP funciona perfectamente via Tailscale"
+          }
+          
           Write-Host "================================================"
           Write-Host ""
-          Write-Host "📝 INSTRUCCIONES:"
+          Write-Host "📝 INSTRUCCIONES RDP:"
           Write-Host "1. Abre 'Conexión a Escritorio Remoto'"
           Write-Host "2. Pega la dirección: $env:TAILSCALE_IP"
           Write-Host "3. Usuario: RDPUser"
           Write-Host "4. Contraseña: RDP123!password"
           Write-Host ""
+          
+          if ($env:HOTSPOT_STATUS -eq 'active') {
+              Write-Host "📡 INSTRUCCIONES HOTSPOT:"
+              Write-Host "1. Busca WiFi: $env:HOTSPOT_SSID"
+              Write-Host "2. Contraseña: $env:HOTSPOT_PASSWORD"
+              Write-Host "3. Luego conecta via RDP a: $env:TAILSCALE_IP"
+          }
 
-      - name: Wait 30 Minutes
+      - name: Monitor Connections
         run: |
           $endTime = (Get-Date).AddMinutes(30)
           Write-Host "⏰ Sesión activa por 30 minutos - Termina a las $($endTime.ToString('HH:mm:ss'))"
@@ -95,7 +224,42 @@ jobs:
               $remaining = $endTime - (Get-Date)
               $minutes = [math]::Floor($remaining.TotalMinutes)
               $seconds = $remaining.Seconds
-              Write-Host "Tiempo restante: $minutes min $seconds seg"
+              
+              # Mostrar estado de conexiones
+              Write-Host "--- Estado de la sesión ---"
+              Write-Host "⏱️  Tiempo restante: $minutes min $seconds seg"
+              
+              # Verificar estado de Tailscale
+              try {
+                  $tsStatus = & "$env:ProgramFiles\Tailscale\tailscale.exe" status --json | ConvertFrom-Json
+                  Write-Host "🔗 Tailscale: $($tsStatus.BackendState)"
+              } catch {
+                  Write-Host "🔗 Tailscale: Error verificando estado"
+              }
+              
+              # Verificar estado del hotspot si está activo
+              if ($env:HOTSPOT_STATUS -eq 'active') {
+                  try {
+                      $hotspotStatus = netsh wlan show hostednetwork | Select-String "Status" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
+                      $clients = netsh wlan show hostednetwork | Select-String "Number of clients" | ForEach-Object { $_.ToString().Split(':')[1].Trim() }
+                      Write-Host "📶 Hotspot: $hotspotStatus (Clientes: $clients)"
+                  } catch {
+                      Write-Host "📶 Hotspot: Error verificando estado"
+                  }
+              }
+              
+              Write-Host "---------------------------"
               Start-Sleep -Seconds 30
           }
+          
           Write-Host "🚫 Sesión RDP finalizada"
+          
+          # Apagar hotspot al finalizar si estaba activo
+          if ($env:HOTSPOT_STATUS -eq 'active') {
+              try {
+                  netsh wlan stop hostednetwork
+                  Write-Host "📴 Hotspot apagado"
+              } catch {
+                  Write-Host "⚠️  Error apagando hotspot"
+              }
+          }
